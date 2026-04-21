@@ -207,6 +207,45 @@ func TestOidc(t *testing.T) {
 			Expect().Status(404)
 	})
 
+	t.Run("LoginWithCustomInstanceSubMismatch", func(t *testing.T) {
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		onboardingFinished := true
+		_ = lifecycle.Patch(testInstance, &lifecycle.Options{
+			OnboardingFinished: &onboardingFinished,
+			OIDCID:             "expected-sub",
+		})
+
+		originalAuth := conf.Authentication["foocontext"]
+		conf.Authentication["foocontext"] = map[string]interface{}{
+			"oidc": map[string]interface{}{
+				"redirect_uri":          "http://foobar.com/redirect",
+				"client_id":             "foo",
+				"client_secret":         "bar",
+				"scope":                 "openid profile",
+				"authorize_url":         "http://foobar.com/authorize",
+				"userinfo_url":          ts.URL + "/api/v1/userinfo",
+				"allow_oauth_token":     true,
+				"allow_custom_instance": true,
+			},
+		}
+		t.Cleanup(func() {
+			conf.Authentication["foocontext"] = originalAuth
+		})
+
+		body := e.GET("/oidc/login").
+			WithHost(testInstance.Domain).
+			WithRedirectPolicy(httpexpect.DontFollowRedirects).
+			WithQuery("access_token", "fc_token").
+			Expect().Status(400).
+			ContentType("text/html").
+			Body()
+
+		body.Contains(testInstance.Domain)
+		body.Contains("fc_sub")
+		body.NotContains("Error from the identity provider.")
+	})
+
 	t.Run("LoginWith2FA", func(t *testing.T) {
 		e := testutils.CreateTestClient(t, ts.URL)
 
