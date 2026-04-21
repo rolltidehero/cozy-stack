@@ -243,14 +243,11 @@ func testWorkerDeletedFile(t *testing.T, inst *instance.Instance) {
 
 func testWorkerDisabled(t *testing.T, inst *instance.Instance) {
 	// Temporarily disable antivirus
-	conf := config.GetConfig()
-	ctxData := conf.Contexts[config.DefaultInstanceContext].(map[string]interface{})
-	avData := ctxData["antivirus"].(map[string]interface{})
-	originalEnabled := avData["enabled"]
-	avData["enabled"] = false
-	defer func() {
-		avData["enabled"] = originalEnabled
-	}()
+	originalEnabled := antivirusEnabledValue(t)
+	t.Cleanup(func() {
+		setAntivirusEnabled(t, originalEnabled)
+	})
+	setAntivirusEnabled(t, false)
 
 	// Create a test file
 	fs := inst.VFS()
@@ -322,12 +319,18 @@ func verifyNotificationCreated(t *testing.T, inst *instance.Instance, fileName s
 // the antivirus worker properly scans the new version.
 func testWorkerFileVersionUpdate(t *testing.T, inst *instance.Instance) {
 	fs := inst.VFS()
+	originalEnabled := antivirusEnabledValue(t)
+	t.Cleanup(func() {
+		setAntivirusEnabled(t, originalEnabled)
+	})
 
 	// Step 1: Create a clean file and scan it
+	setAntivirusEnabled(t, false)
 	doc := createTestFile(t, fs, "version-test.txt", []byte("This is clean content"))
 	defer deleteTestFile(t, fs, doc)
 
 	// Run initial scan
+	setAntivirusEnabled(t, true)
 	msg, err := job.NewMessage(&antivirus.Message{FileID: doc.DocID})
 	require.NoError(t, err)
 
@@ -350,13 +353,14 @@ func testWorkerFileVersionUpdate(t *testing.T, inst *instance.Instance) {
 	originalMD5 := doc.MD5Sum
 
 	// Step 2: Update file with infected content (simulating new version upload)
-	// Note: updateTestFileContent handles conflicts from background antivirus jobs
+	setAntivirusEnabled(t, false)
 	doc = updateTestFileContent(t, fs, doc, testutils.EICARTestSignature())
 
 	// Verify MD5 changed (content was updated)
 	require.NotEqual(t, originalMD5, doc.MD5Sum, "MD5 should change when content is updated")
 
 	// Step 3: Run scan again on the updated file
+	setAntivirusEnabled(t, true)
 	msg, err = job.NewMessage(&antivirus.Message{FileID: doc.DocID})
 	require.NoError(t, err)
 
@@ -433,4 +437,22 @@ func updateTestFileContent(t *testing.T, fs vfs.VFS, olddoc *vfs.FileDoc, newCon
 
 	require.NoError(t, err)
 	return result
+}
+
+func antivirusEnabledValue(t *testing.T) bool {
+	t.Helper()
+
+	conf := config.GetConfig()
+	ctxData := conf.Contexts[config.DefaultInstanceContext].(map[string]interface{})
+	avData := ctxData["antivirus"].(map[string]interface{})
+	return avData["enabled"].(bool)
+}
+
+func setAntivirusEnabled(t *testing.T, enabled bool) {
+	t.Helper()
+
+	conf := config.GetConfig()
+	ctxData := conf.Contexts[config.DefaultInstanceContext].(map[string]interface{})
+	avData := ctxData["antivirus"].(map[string]interface{})
+	avData["enabled"] = enabled
 }
