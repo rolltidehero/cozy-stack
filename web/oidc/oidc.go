@@ -45,7 +45,7 @@ var (
 )
 
 // DomainMismatchError is returned when the user tries to connect to an
-// instance but has an active OIDC session for a different instance.
+// instance but has an active OIDC session for a different instance/account.
 type DomainMismatchError struct {
 	ExpectedDomain string // The instance the user is trying to access
 	ActualDomain   string // The instance from the OIDC token
@@ -1289,12 +1289,19 @@ func checkDomainFromUserInfo(conf *Config, inst *instance.Instance, token string
 		if conf.Provider == oidcprovider.FranceConnectProvider {
 			expected = inst.FranceConnectID
 		}
-		if !ok || sub == "" || sub != expected {
+		if !ok || sub == "" {
 			inst.Logger().WithNamespace("oidc").Errorf("Invalid sub: %s != %s", sub, expected)
 			if conf.Provider == oidcprovider.FranceConnectProvider {
 				return ErrFranceConnectFailed
 			}
 			return ErrAuthenticationFailed
+		}
+		if sub != expected {
+			inst.Logger().WithNamespace("oidc").Errorf("Invalid sub: %s != %s", sub, expected)
+			if conf.Provider == oidcprovider.FranceConnectProvider {
+				return ErrFranceConnectFailed
+			}
+			return &DomainMismatchError{ExpectedDomain: inst.Domain, ActualDomain: sub}
 		}
 		return nil
 	}
@@ -1386,9 +1393,14 @@ func checkIDToken(conf *Config, inst *instance.Instance, idToken string) error {
 		logger.WithNamespace("oidc").Errorf("Error on VerifyIDToken: %s", err)
 		return ErrInvalidToken
 	}
-	if claims["sub"] == "" || claims["sub"] != inst.OIDCID {
-		inst.Logger().WithNamespace("oidc").Errorf("Invalid sub: %s != %s", claims["sub"], inst.OIDCID)
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		inst.Logger().WithNamespace("oidc").Errorf("Invalid sub: %v != %s", claims["sub"], inst.OIDCID)
 		return ErrAuthenticationFailed
+	}
+	if sub != inst.OIDCID {
+		inst.Logger().WithNamespace("oidc").Errorf("Invalid sub: %s != %s", sub, inst.OIDCID)
+		return &DomainMismatchError{ExpectedDomain: inst.Domain, ActualDomain: sub}
 	}
 
 	return nil
