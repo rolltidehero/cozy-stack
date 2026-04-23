@@ -125,17 +125,19 @@ func NewUserCreatedHandler() *UserCreatedHandler {
 
 // UserCreatedMessage represents a user creation message.
 type UserCreatedMessage struct {
-	TwakeID       string `json:"twakeId"`
-	Domain        string `json:"domain"`
-	Mobile        string `json:"mobile"`
-	InternalEmail string `json:"internalEmail"`
-	Iterations    int    `json:"iterations"`
-	Hash          string `json:"hash"`
-	PublicKey     string `json:"publicKey"`
-	PrivateKey    string `json:"privateKey"`
-	Key           string `json:"key"`
-	Timestamp     int64  `json:"timestamp"`
-	WorkplaceFqdn string `json:"workplaceFqdn"` // The fully qualified workplace domain
+	TwakeID            string `json:"twakeId"`
+	Domain             string `json:"domain"`
+	Mobile             string `json:"mobile"`
+	InternalEmail      string `json:"internalEmail"`
+	Iterations         int    `json:"iterations"`
+	Hash               string `json:"hash"`
+	PublicKey          string `json:"publicKey"`
+	PrivateKey         string `json:"privateKey"`
+	Key                string `json:"key"`
+	Timestamp          int64  `json:"timestamp"`
+	WorkplaceFqdn      string `json:"workplaceFqdn"` // The fully qualified workplace domain
+	OrganizationID     string `json:"organizationId,omitempty"`
+	OrganizationDomain string `json:"organizationDomain,omitempty"`
 }
 
 // Handle processes a user created message.
@@ -216,6 +218,70 @@ func (h *UserCreatedHandler) Handle(ctx context.Context, d amqp.Delivery) error 
 		return fmt.Errorf("user.created: update passphrase: %w", err)
 	}
 	log.Infof("user.created: successfully updated passphrase for instance: %s (PasswordDefined: %v)", inst.Domain, inst.PasswordDefined)
+
+	if msg.OrganizationDomain != "" {
+		if err := SyncCreatedOrgContact(ctx, inst, msg); err != nil {
+			log.Errorf("user.created: failed to sync organization contacts for %s: %v", msg.WorkplaceFqdn, err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+// UserDeletedHandler handles B2B user deletion messages.
+type UserDeletedHandler struct{}
+
+// NewUserDeletedHandler creates a new user deleted handler.
+func NewUserDeletedHandler() *UserDeletedHandler {
+	return &UserDeletedHandler{}
+}
+
+// UserDeletedMessage represents a B2B user deletion message.
+type UserDeletedMessage struct {
+	Emitter        string `json:"emitter"`
+	Type           string `json:"type"`
+	WorkplaceFqdn  string `json:"workplaceFqdn"`
+	InternalEmail  string `json:"internalEmail"`
+	Reason         string `json:"reason"`
+	OrganizationID string `json:"organizationId"`
+	UserID         string `json:"userId"`
+	Domain         string `json:"domain"`
+}
+
+// Handle processes a B2B user deletion message.
+func (h *UserDeletedHandler) Handle(ctx context.Context, d amqp.Delivery) error {
+	log.Infof("user.deleted: received message: %s", d.RoutingKey)
+	log.Debugf("user.deleted: message details - MessageId: %s, ContentType: %s, Body size: %d bytes",
+		d.MessageId, d.ContentType, len(d.Body))
+
+	var msg UserDeletedMessage
+	if err := json.Unmarshal(d.Body, &msg); err != nil {
+		return fmt.Errorf("user.deleted: failed to unmarshal message: %w", err)
+	}
+
+	msg.WorkplaceFqdn = strings.TrimSpace(msg.WorkplaceFqdn)
+	msg.InternalEmail = strings.TrimSpace(msg.InternalEmail)
+	msg.Domain = strings.TrimSpace(msg.Domain)
+
+	if msg.WorkplaceFqdn == "" {
+		return fmt.Errorf("user.deleted: missing workplaceFqdn")
+	}
+	if msg.InternalEmail == "" {
+		return fmt.Errorf("user.deleted: missing internalEmail")
+	}
+	if msg.Domain == "" {
+		return fmt.Errorf("user.deleted: missing organization domain")
+	}
+
+	log.Infof("user.deleted: processing message - UserID: %s, InternalEmail: %s, WorkplaceFqdn: %s, Domain: %s, OrganizationID: %s, Reason: %s",
+		msg.UserID, msg.InternalEmail, msg.WorkplaceFqdn, msg.Domain, msg.OrganizationID, msg.Reason)
+
+	if err := SyncDeletedOrgContact(ctx, msg); err != nil {
+		log.Errorf("user.deleted: failed to sync organization contacts for %s: %v", msg.WorkplaceFqdn, err)
+		return err
+	}
+
 	return nil
 }
 

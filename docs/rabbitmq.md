@@ -46,6 +46,7 @@ rabbitmq:
   enabled: true
   nodes:
     default:
+      enabled: true
       url: amqp://guest:guest@localhost:5672/
       tls:
         # root_ca: /etc/ssl/certs/ca.pem
@@ -55,26 +56,84 @@ rabbitmq:
     - name: auth
       kind: topic
       durable: true
-      declare_exchange: true
-      dlx_name: auth.dlx
-      dlq_name: auth.dlq
+      declare_exchange: false
       queues:
-        - name: user.password.updated
+        - name: stack.user.password.updated
           declare: true
           declare_dlx: true
           declare_dlq: true
+          dlx_name: stack.auth.dlx
+          dlq_name: stack.dead.letter.user.password.updated
+          dl_routing_key: password.updated.dead
           prefetch: 8
           delivery_limit: 5
           bindings:
-            - password.changed
-        - name: user.created
+            - user.password.updated
+        - name: stack.user.created
           declare: true
-          declare_dlx: false
+          declare_dlx: true
           declare_dlq: true
+          dlx_name: stack.auth.dlx
+          dlq_name: stack.dead.letter.user.created
+          dl_routing_key: user.created.dead
           prefetch: 8
           delivery_limit: 5
           bindings:
             - user.created
+        - name: stack.user.phone.updated
+          declare: true
+          declare_dlx: true
+          declare_dlq: true
+          dlx_name: stack.auth.dlx
+          dlq_name: stack.dead.letter.user.phone.updated
+          dl_routing_key: user.phone.updated.dead
+          prefetch: 8
+          delivery_limit: 5
+          bindings:
+            - user.phone.updated
+    - name: billing
+      kind: topic
+      durable: true
+      declare_exchange: false
+      queues:
+        - name: stack.domain.subscription.changed
+          declare: true
+          declare_dlx: true
+          declare_dlq: true
+          dlx_name: stack.billing.dlx
+          dlq_name: stack.dead.letter.domain.subscription.changed
+          dl_routing_key: domain.subscription.changed.dead
+          prefetch: 8
+          delivery_limit: 5
+          bindings:
+            - domain.subscription.changed
+    - name: b2b
+      kind: topic
+      durable: true
+      declare_exchange: false
+      queues:
+        - name: stack.user.lifecycle.queue
+          declare: true
+          declare_dlx: true
+          declare_dlq: true
+          dlx_name: stack.b2b.dlx
+          dlq_name: stack.dead.letter.user.lifecycle
+          dl_routing_key: domain.user.deleted.dead
+          prefetch: 8
+          delivery_limit: 5
+          bindings:
+            - domain.user.deleted
+        - name: stack.app.commands.queue
+          declare: true
+          declare_dlx: true
+          declare_dlq: true
+          dlx_name: stack.b2b.dlx
+          dlq_name: stack.dead.letter.app.commands
+          dl_routing_key: app.installation.requested.dead
+          prefetch: 8
+          delivery_limit: 5
+          bindings:
+            - app.installation.requested
 ```
 
 ### Dead Letter Exchange (DLX) and Dead Letter Queue (DLQ)
@@ -99,28 +158,35 @@ rabbitmq:
   enabled: true
   nodes:
     default:
+      enabled: true
       url: amqp://guest:guest@localhost:5672/
+    linagora_default:
+      enabled: false
+      url: amqp://guest:guest@localhost:5673/
   exchanges:
     - name: auth
       kind: topic
       durable: true
-      declare_exchange: true
-      dlx_name: auth.dlx
-      dlq_name: auth.dlq
+      declare_exchange: false
       queues:
-        - name: user.password.updated
+        - name: stack.user.password.updated
           declare: true
           declare_dlx: true
           declare_dlq: true
+          dlx_name: stack.auth.dlx
+          dlq_name: stack.dead.letter.user.password.updated
+          dl_routing_key: password.updated.dead
           prefetch: 8
           delivery_limit: 5
           bindings:
-            - password.changed
-        - name: user.created
+            - user.password.updated
+        - name: stack.user.created
           declare: true
-          declare_dlx: false
+          declare_dlx: true
           declare_dlq: true
-          dlq_name: user.created.dlq  # Override exchange default
+          dlx_name: stack.auth.dlx
+          dlq_name: stack.dead.letter.user.created
+          dl_routing_key: user.created.dead
           prefetch: 8
           delivery_limit: 5
           bindings:
@@ -188,9 +254,10 @@ Returning `nil` acknowledges the message. Returning a non-nil error causes the m
 
 Queue names are mapped to handlers in the stack. For example:
 
-- `user.password.updated` → updates an instance passphrase when a `password.changed` routing key is received.
+- `user.password.updated` → updates an instance passphrase when a `user.password.updated` routing key is received.
 - `user.created` → validates and processes user creation events.
 - `user.phone.updated` → updates the phone number stored in user settings.
+- `domain.user.deleted` on the `b2b` exchange → removes externally managed organization contacts.
 
 Message schemas are JSON and validated in the handler. Example payload for `user.password.updated`:
 
@@ -219,9 +286,32 @@ Example payload for `user.created`:
   "publicKey": "base64",
   "privateKey": "cipherString",
   "key": "cipherString",
-  "timestamp": 1726040000
+  "timestamp": 1726040000,
+  "workplaceFqdn": "alice.example.twake.app",
+  "organizationId": "org-uuid-123",
+  "organizationDomain": "example.com",
+  "canUpgrade": false
 }
 ```
+
+
+Example payload for `b2b/domain.user.deleted`:
+
+```json
+{
+  "emitter": "admin-panel",
+  "type": "user.deleted",
+  "workplaceFqdn": "alice.example.twake.app",
+  "internalEmail": "alice@example.com",
+  "reason": "user deleted",
+  "organizationId": "org-uuid-123",
+  "userId": "alice",
+  "domain": "example.com"
+}
+```
+
+The delete handler removes the single matching contact found by `internalEmail`
+when `metadata.external` is true. 
 
 Example payload for `user.phone.updated`:
 
@@ -330,4 +420,3 @@ ch.PublishWithContext(ctx,
     },
 )
 ```
-

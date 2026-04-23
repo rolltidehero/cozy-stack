@@ -129,10 +129,10 @@ rabbitmq:
       kind: topic
       durable: true
       declare_exchange: true
-      dlx_name: auth.dlx
-      dlq_name: auth.dlq
+      dlx_name: stack.auth.dlx
+      dlq_name: stack.auth.dlq
       queues:
-        - name: user.password.updated
+        - name: stack.user.password.updated
           declare: true
           declare_dlx: true
           declare_dlq: true
@@ -140,7 +140,7 @@ rabbitmq:
           delivery_limit: 5
           bindings:
             - password.changed
-        - name: user.created
+        - name: stack.user.created
           declare: true
           declare_dlx: false
           declare_dlq: true
@@ -148,6 +148,21 @@ rabbitmq:
           delivery_limit: 5
           bindings:
             - user.created
+    - name: b2b
+      kind: topic
+      durable: true
+      declare_exchange: false
+      dlx_name: stack.b2b.dlx
+      dlq_name: stack.b2b.dlq
+      queues:
+        - name: stack.b2b.user.deleted
+          declare: true
+          declare_dlx: true
+          declare_dlq: true
+          prefetch: 8
+          delivery_limit: 5
+          bindings:
+            - user.deleted
 
 common_settings:
   default:

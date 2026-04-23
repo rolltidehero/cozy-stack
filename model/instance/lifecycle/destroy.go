@@ -202,7 +202,10 @@ func sendAlert(inst *instance.Instance, e error) {
 }
 
 func removeTriggers(inst *instance.Instance) {
-	sched := job.System()
+	sched := job.SystemUnsafe()
+	if sched == nil {
+		return
+	}
 	triggers, err := sched.GetAllTriggers(inst)
 	if err == nil {
 		for _, t := range triggers {

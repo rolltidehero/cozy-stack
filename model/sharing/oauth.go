@@ -535,7 +535,11 @@ func (s *Sharing) SendAnswer(inst *instance.Instance, state string) error {
 		c, err := contact.FindByEmail(inst, s.Members[0].Email)
 		if err != nil {
 			// Contact doesn't exist, create it using the standardized method
-			c, err = contact.CreateFromSharingMember(inst, s.Members[0].Email, s.Members[0].Name, s.Members[0].Instance)
+			c, err = contact.Create(inst, contact.CreateOptions{
+				Email:   s.Members[0].Email,
+				Name:    s.Members[0].Name,
+				CozyURL: s.Members[0].Instance,
+			})
 			if err != nil {
 				if couchdb.IsConflictError(err) {
 					c, err = contact.FindByEmail(inst, s.Members[0].Email)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/cozy/cozy-stack/model/app"
 	"github.com/cozy/cozy-stack/model/bitwarden/settings"
+	"github.com/cozy/cozy-stack/model/contact"
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/settings/common"
 	"github.com/cozy/cozy-stack/pkg/consts"
@@ -334,6 +335,59 @@ func TestHandlers(t *testing.T) {
 		// Public and private keys must remain unchanged when only Key is provided
 		require.Equal(t, prevPub, bw.PublicKey)
 		require.Equal(t, prevPriv, bw.PrivateKey)
+	})
+
+	t.Run("DeleteUserHandler", func(t *testing.T) {
+		setup := setUpRabbitMQConfig(t, MQ, "DeleteUserHandler")
+		_ = setup.GetTestInstance()
+
+		suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+		orgDomain := "delete-handler-" + suffix + ".example"
+		orgID := "org-delete-handler-" + suffix
+		target := createInstanceInOrg(t, "delete-handler-alice-"+suffix+".local", orgDomain, orgID, "alice@example.com", "Alice")
+		bob := createInstanceInOrg(t, "delete-handler-bob-"+suffix+".local", orgDomain, orgID, "bob@example.com", "Bob")
+
+		createContact(t, bob, "alice@example.com", target.PageURL("", nil), true, "Alice External")
+
+		ch, err := getChannel(t, MQ)
+		require.NoError(t, err)
+		waitForDeclaredQueues(t, MQ, queuePassiveCheck{
+			name:         rabbitmq.QueueB2BUserDeleted,
+			dlRoutingKey: rabbitmq.RoutingKeyB2BUserDeleted,
+		})
+
+		msg := rabbitmq.UserDeletedMessage{
+			Emitter:        "admin-panel",
+			Type:           "user.deleted",
+			WorkplaceFqdn:  target.Domain,
+			InternalEmail:  "alice@example.com",
+			Reason:         "user deleted",
+			OrganizationID: orgID,
+			UserID:         "alice",
+			Domain:         orgDomain,
+		}
+		body, err := json.Marshal(msg)
+		require.NoError(t, err)
+
+		err = ch.PublishWithContext(
+			testCtx(t),
+			"b2b",
+			"user.deleted",
+			false,
+			false,
+			amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				ContentType:  "application/json",
+				Body:         body,
+				MessageId:    fmt.Sprintf("%d", time.Now().UnixNano()),
+			},
+		)
+		require.NoError(t, err)
+
+		testutils.WaitForOrFail(t, 10*time.Second, func() bool {
+			_, err := contact.FindAllByEmail(bob, "alice@example.com")
+			return err == contact.ErrNotFound
+		})
 	})
 
 	t.Run("UpdateUserPhone", func(t *testing.T) {
@@ -811,6 +865,53 @@ func TestHandlers(t *testing.T) {
 	})
 }
 
+func TestUserDeletedHandlerValidation(t *testing.T) {
+	t.Run("MissingWorkplaceFqdn", func(t *testing.T) {
+		body, err := json.Marshal(rabbitmq.UserDeletedMessage{
+			InternalEmail: "alice@example.com",
+			Domain:        "example.com",
+		})
+		require.NoError(t, err)
+
+		err = rabbitmq.NewUserDeletedHandler().Handle(testCtx(t), amqp.Delivery{
+			RoutingKey: "user.deleted",
+			Body:       body,
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "missing workplaceFqdn")
+	})
+
+	t.Run("MissingInternalEmail", func(t *testing.T) {
+		body, err := json.Marshal(rabbitmq.UserDeletedMessage{
+			WorkplaceFqdn: "alice.example.com",
+			Domain:        "example.com",
+		})
+		require.NoError(t, err)
+
+		err = rabbitmq.NewUserDeletedHandler().Handle(testCtx(t), amqp.Delivery{
+			RoutingKey: "user.deleted",
+			Body:       body,
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "missing internalEmail")
+	})
+
+	t.Run("MissingOrganizationDomain", func(t *testing.T) {
+		body, err := json.Marshal(rabbitmq.UserDeletedMessage{
+			WorkplaceFqdn: "alice.example.com",
+			InternalEmail: "alice@example.com",
+		})
+		require.NoError(t, err)
+
+		err = rabbitmq.NewUserDeletedHandler().Handle(testCtx(t), amqp.Delivery{
+			RoutingKey: "user.deleted",
+			Body:       body,
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "missing organization domain")
+	})
+}
+
 func hashPassphrase(t *testing.T) (string, string) {
 	t.Helper()
 	passphrase := []byte("super-secret-create-user-key")
@@ -829,6 +930,63 @@ func getChannel(t *testing.T, mq *testutils.RabbitFixture) (*amqp.Channel, error
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ch.Close(); _ = conn.Close() })
 	return ch, err
+}
+
+type queuePassiveCheck struct {
+	name         string
+	dlRoutingKey string
+}
+
+func waitForDeclaredQueues(t *testing.T, mq *testutils.RabbitFixture, checks ...queuePassiveCheck) {
+	t.Helper()
+
+	testutils.WaitForOrFail(t, 10*time.Second, func() bool {
+		conn, err := amqp.Dial(mq.AMQPURL)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = conn.Close() }()
+
+		ch, err := conn.Channel()
+		if err != nil {
+			return false
+		}
+		defer func() { _ = ch.Close() }()
+
+		for _, check := range checks {
+			_, err = ch.QueueInspect(check.name)
+			if err != nil {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+func createInstanceInOrg(t *testing.T, domain, orgDomain, orgID, email, publicName string) *instance.Instance {
+	t.Helper()
+	inst, err := lifecycle.Create(&lifecycle.Options{
+		Domain:     domain,
+		OrgDomain:  orgDomain,
+		OrgID:      orgID,
+		Email:      email,
+		PublicName: publicName,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lifecycle.Destroy(inst.Domain) })
+	return inst
+}
+
+func createContact(t *testing.T, inst *instance.Instance, email, cozyURL string, external bool, name string) *contact.Contact {
+	t.Helper()
+	c, err := contact.Create(inst, contact.CreateOptions{
+		Email:    email,
+		Name:     name,
+		CozyURL:  cozyURL,
+		External: external,
+	})
+	require.NoError(t, err)
+	return c
 }
 
 func setUpRabbitMQConfig(t *testing.T, mq *testutils.RabbitFixture, name string) *testutils.TestSetup {
@@ -895,6 +1053,20 @@ func setUpRabbitMQConfig(t *testing.T, mq *testutils.RabbitFixture, name string)
 			},
 		},
 		{
+			Name:            "b2b",
+			Kind:            "topic",
+			Durable:         true,
+			DeclareExchange: true,
+			Queues: []config.RabbitQueue{
+				{
+					Name:     "stack.b2b.user.deleted",
+					Bindings: []string{"user.deleted"},
+					Prefetch: 4,
+					Declare:  true,
+				},
+			},
+		},
+		{
 			Name:            "stack",
 			Kind:            "topic",
 			Durable:         true,
@@ -910,7 +1082,6 @@ func setUpRabbitMQConfig(t *testing.T, mq *testutils.RabbitFixture, name string)
 		},
 	}
 
-	// Start the stack via testutils and create an instance
 	setup := testutils.NewSetup(t, name)
 	return setup
 }

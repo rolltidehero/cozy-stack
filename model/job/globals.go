@@ -52,3 +52,8 @@ func System() JobSystem {
 	}
 	return globalJobSystem
 }
+
+// SystemUnsafe returns the global job system, even if it's not initialized
+func SystemUnsafe() JobSystem {
+	return globalJobSystem
+}

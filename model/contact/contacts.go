@@ -237,13 +237,17 @@ func Find(db prefixer.Prefixer, contactID string) (*Contact, error) {
 	return doc, err
 }
 
-// FindByEmail returns the contact with the given email address, when possible
-func FindByEmail(db prefixer.Prefixer, email string) (*Contact, error) {
+// FindAllByEmail returns all contacts with the given email address, when possible.
+func FindAllByEmail(db prefixer.Prefixer, email string) ([]*Contact, error) {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil, ErrNotFound
+	}
+
 	var res couchdb.ViewResponse
 	err := couchdb.ExecView(db, couchdb.ContactByEmail, &couchdb.ViewRequest{
 		Key:         email,
 		IncludeDocs: true,
-		Limit:       1,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -251,9 +255,35 @@ func FindByEmail(db prefixer.Prefixer, email string) (*Contact, error) {
 	if len(res.Rows) == 0 {
 		return nil, ErrNotFound
 	}
-	doc := &Contact{}
-	err = json.Unmarshal(res.Rows[0].Doc, &doc)
-	return doc, err
+
+	docs := make([]*Contact, 0, len(res.Rows))
+	for _, row := range res.Rows {
+		doc := &Contact{}
+		if err := json.Unmarshal(row.Doc, doc); err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	return docs, nil
+}
+
+// FindByEmail returns the contact with the given email address, when possible.
+func FindByEmail(db prefixer.Prefixer, email string) (*Contact, error) {
+	docs, err := FindAllByEmail(db, email)
+	if err != nil {
+		return nil, err
+	}
+	return docs[0], nil
+}
+
+// IsExternal returns true if this contact was created from an external source.
+func (c *Contact) IsExternal() bool {
+	metadata, ok := c.Get("metadata").(map[string]interface{})
+	if !ok {
+		return false
+	}
+	external, _ := metadata["external"].(bool)
+	return external
 }
 
 // CreateMyself creates the myself contact document from the instance settings.
@@ -294,9 +324,18 @@ func CreateMyself(inst *instance.Instance, settings *couchdb.JSONDoc) (*Contact,
 	return doc, nil
 }
 
-// CreateFromSharingMember creates a contact from sharing member information.
-// This is useful when accepting a sharing and we want to create a contact for the sender.
-func CreateFromSharingMember(inst *instance.Instance, email, name, cozyURL string) (*Contact, error) {
+// CreateOptions describes the input used to create a contact.
+type CreateOptions struct {
+	Email    string
+	Name     string
+	CozyURL  string
+	Phone    string
+	External bool
+}
+
+// Create creates a contact from the provided options.
+func Create(db prefixer.Prefixer, opts CreateOptions) (*Contact, error) {
+	email := strings.TrimSpace(opts.Email)
 	if email == "" {
 		return nil, ErrNoMailAddress
 	}
@@ -306,6 +345,7 @@ func CreateFromSharingMember(inst *instance.Instance, email, name, cozyURL strin
 		{"address": email, "primary": true},
 	}
 
+	name := strings.TrimSpace(opts.Name)
 	displayName := name
 	if name == "" {
 		parts := strings.SplitN(email, "@", 2)
@@ -317,9 +357,20 @@ func CreateFromSharingMember(inst *instance.Instance, email, name, cozyURL strin
 	}
 	doc.JSONDoc.M["displayName"] = displayName
 
+	cozyURL := strings.TrimSpace(opts.CozyURL)
 	if cozyURL != "" {
 		doc.JSONDoc.M["cozy"] = []map[string]interface{}{
 			{"url": cozyURL, "primary": true},
+		}
+	}
+	if phone := strings.TrimSpace(opts.Phone); phone != "" {
+		doc.JSONDoc.M["phone"] = []map[string]interface{}{
+			{"number": phone, "primary": true},
+		}
+	}
+	if opts.External {
+		doc.JSONDoc.M["metadata"] = map[string]interface{}{
+			"external": true,
 		}
 	}
 
@@ -331,7 +382,7 @@ func CreateFromSharingMember(inst *instance.Instance, email, name, cozyURL strin
 		"byFamilyNameGivenNameEmailCozyUrl": index,
 	}
 
-	if err := couchdb.CreateDoc(inst, doc); err != nil {
+	if err := couchdb.CreateDoc(db, doc); err != nil {
 		return nil, err
 	}
 	return doc, nil

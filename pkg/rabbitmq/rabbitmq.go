@@ -269,6 +269,8 @@ func BuildExchangeSpecs(exchangesCfg []config.RabbitExchange) []ExchangeSpec {
 				handler = NewUserRecoveryEmailUpdatedHandler()
 			case QueueDomainSubscriptionChanged:
 				handler = NewDomainSubscriptionChangedHandler()
+			case QueueB2BUserDeleted:
+				handler = NewUserDeletedHandler()
 			case QueueAppCommands:
 				handler = NewAppInstallHandler()
 			}

@@ -12,11 +12,13 @@ const (
 	QueueDomainSubscriptionChanged = "stack.domain.subscription.changed"
 	QueueUser2FAUpdated            = "stack.user.2fa.updated"
 	QueueUserRecoveryEmailUpdated  = "stack.user.recovery-email.updated"
+	QueueB2BUserDeleted            = "stack.b2b.user.deleted"
 	QueueAppCommands               = "stack.app.commands.queue"
 )
 
 const (
 	RoutingKeyUserPasswordUpdated         = "user.password.updated"
+	RoutingKeyB2BUserDeleted              = "user.deleted"
 	RoutingKeyUserDeletionRequested       = "user.deletion.requested"
 	RoutingKeyNextcloudMigrationRequested = "nextcloud.migration.requested"
 	RoutingKeyNextcloudMigrationCanceled  = "nextcloud.migration.canceled"
