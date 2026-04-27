@@ -122,7 +122,7 @@ func TriggerMigration(
 		return nil, fmt.Errorf("ensure nextcloud account: %w", err)
 	}
 
-	doc := NewPendingMigration(req.TargetDir)
+	doc := NewPendingMigration(req.TargetDir, req.SourcePath)
 	if err := couchdb.CreateDoc(inst, doc); err != nil {
 		log.WithField("account_id", accountID).
 			Errorf("Failed to create migration tracking doc: %s", err)

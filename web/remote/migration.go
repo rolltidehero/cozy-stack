@@ -147,3 +147,46 @@ func mapNextcloudMigrationCancelError(err error) error {
 		return jsonapi.InternalServerError(err)
 	}
 }
+
+// postNextcloudMigrationDeleteSource removes the Nextcloud folder ingested
+// by the given migration. Synchronous because the Stack holds the stored
+// credentials and doing it via the broker would add no resilience over a
+// single WebDAV DELETE the server handles recursively.
+func (h *HTTPHandler) postNextcloudMigrationDeleteSource(c echo.Context) error {
+	if err := middlewares.AllowWholeType(c, permission.POST, consts.NextcloudMigrations); err != nil {
+		return err
+	}
+	inst := middlewares.GetInstance(c)
+	migrationID := c.Param("id")
+	if migrationID == "" {
+		return jsonapi.BadRequest(errors.New("missing migration id"))
+	}
+
+	reqLogger := inst.Logger().WithNamespace(nextcloudMigrationLogNamespace).WithFields(logger.Fields{
+		"migration_id": migrationID,
+	})
+	ctx := logger.WithContext(c.Request().Context(), reqLogger)
+
+	if err := nextcloud.DeleteMigrationSource(ctx, inst, migrationID); err != nil {
+		return mapNextcloudMigrationDeleteSourceError(err)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func mapNextcloudMigrationDeleteSourceError(err error) error {
+	switch {
+	case errors.Is(err, nextcloud.ErrMigrationNotFound):
+		return jsonapi.NotFound(err)
+	case errors.Is(err, nextcloud.ErrNextcloudAccountMissing):
+		return jsonapi.NotFound(err)
+	case errors.Is(err, nextcloud.ErrMigrationNotDeletable),
+		errors.Is(err, nextcloud.ErrMigrationSourceAlreadyDeleted):
+		return jsonapi.Conflict(err)
+	case errors.Is(err, webdav.ErrInvalidAuth):
+		return jsonapi.Unauthorized(errors.New("nextcloud credentials are invalid"))
+	case errors.Is(err, nextcloud.ErrNextcloudUnreachable):
+		return jsonapi.BadGateway(fmt.Errorf("nextcloud unreachable: %w", err))
+	default:
+		return jsonapi.InternalServerError(err)
+	}
+}

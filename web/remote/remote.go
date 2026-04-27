@@ -35,6 +35,7 @@ func (h *HTTPHandler) Register(router *echo.Group) {
 	Routes(router)
 	router.POST("/nextcloud/migration", h.postNextcloudMigration)
 	router.POST("/nextcloud/migration/:id/cancel", h.postNextcloudMigrationCancel)
+	router.POST("/nextcloud/migration/:id/delete-source", h.postNextcloudMigrationDeleteSource)
 }
 
 func allDoctypes(c echo.Context) error {

@@ -33,12 +33,15 @@ var ErrMigrationConflict = errors.New("a nextcloud migration is already in progr
 // reducer because it spreads doc.progress and adds to its fields.
 //
 // CancelRequested and CanceledAt are written by the migration service;
-// the Stack round-trips them without modification.
+// the Stack round-trips them without modification. SourcePath and
+// SourceDeletedAt are written only by the Stack (trigger and delete-source
+// respectively); SourceDeletedAt is never cleared once stamped.
 type Migration struct {
 	DocID           string            `json:"_id,omitempty"`
 	DocRev          string            `json:"_rev,omitempty"`
 	Status          string            `json:"status"`
 	TargetDir       string            `json:"target_dir"`
+	SourcePath      string            `json:"source_path,omitempty"`
 	Progress        MigrationProgress `json:"progress"`
 	Errors          []MigrationError  `json:"errors"`
 	Skipped         []SkippedFile     `json:"skipped"`
@@ -46,6 +49,7 @@ type Migration struct {
 	FinishedAt      *time.Time        `json:"finished_at"`
 	CancelRequested bool              `json:"cancel_requested,omitempty"`
 	CanceledAt      *time.Time        `json:"canceled_at,omitempty"`
+	SourceDeletedAt *time.Time        `json:"source_deleted_at,omitempty"`
 }
 
 type MigrationProgress struct {
@@ -96,6 +100,10 @@ func (m *Migration) Clone() couchdb.Doc {
 		t := *m.CanceledAt
 		cloned.CanceledAt = &t
 	}
+	if m.SourceDeletedAt != nil {
+		t := *m.SourceDeletedAt
+		cloned.SourceDeletedAt = &t
+	}
 	return &cloned
 }
 
@@ -121,17 +129,19 @@ var (
 
 // NewPendingMigration returns a fresh Migration document in the pending state.
 // Errors and Skipped are explicit empty slices so the JSON serialization
-// produces "[]" rather than "null" — the migration service consumes them as
-// arrays and would crash on null.
-func NewPendingMigration(targetDir string) *Migration {
+// produces "[]" rather than "null": the migration service consumes them as
+// arrays and would crash on null. sourcePath must be the normalized
+// Nextcloud-side path from the trigger request.
+func NewPendingMigration(targetDir, sourcePath string) *Migration {
 	if targetDir == "" {
 		targetDir = DefaultMigrationTargetDir
 	}
 	return &Migration{
-		Status:    MigrationStatusPending,
-		TargetDir: targetDir,
-		Errors:    []MigrationError{},
-		Skipped:   []SkippedFile{},
+		Status:     MigrationStatusPending,
+		TargetDir:  targetDir,
+		SourcePath: sourcePath,
+		Errors:     []MigrationError{},
+		Skipped:    []SkippedFile{},
 	}
 }
 

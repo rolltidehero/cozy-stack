@@ -82,7 +82,15 @@ func New(inst *instance.Instance, accountID string) (*NextCloud, error) {
 		}
 		return nil, err
 	}
-	account.Decrypt(doc)
+	return newFromAccountDoc(inst, &doc)
+}
+
+// newFromAccountDoc builds a client from an already-fetched account doc,
+// decrypting it in place. Intended for callers that just scanned for the
+// account (e.g. FindNextcloudAccount) and would otherwise pay a second
+// GetDoc inside New.
+func newFromAccountDoc(inst *instance.Instance, doc *couchdb.JSONDoc) (*NextCloud, error) {
+	account.Decrypt(*doc)
 
 	if doc.M == nil || doc.M["account_type"] != "nextcloud" {
 		return nil, ErrInvalidAccount
@@ -113,11 +121,11 @@ func New(inst *instance.Instance, accountID string) (*NextCloud, error) {
 	}
 	nc := &NextCloud{
 		inst:        inst,
-		accountID:   accountID,
+		accountID:   doc.ID(),
 		installRoot: installRoot,
 		webdav:      webdav,
 	}
-	if err := nc.fillUserID(&doc); err != nil {
+	if err := nc.fillUserID(doc); err != nil {
 		return nil, err
 	}
 	return nc, nil

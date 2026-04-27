@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cozy/cozy-stack/model/instance"
 	"github.com/cozy/cozy-stack/model/nextcloud"
@@ -386,7 +388,7 @@ func TestPostNextcloudMigration(t *testing.T) {
 		setup := testutils.NewSetup(t, "ncmigration-conflict")
 		inst := setup.GetTestInstance()
 
-		existing := nextcloud.NewPendingMigration("")
+		existing := nextcloud.NewPendingMigration("", "")
 		existing.Status = nextcloud.MigrationStatusRunning
 		require.NoError(t, couchdb.CreateDoc(inst, existing))
 
@@ -646,7 +648,7 @@ func TestPostNextcloudMigrationCancel(t *testing.T) {
 		setup := testutils.NewSetup(t, "ncmigration-cancel-happy")
 		inst := setup.GetTestInstance()
 
-		doc := nextcloud.NewPendingMigration("")
+		doc := nextcloud.NewPendingMigration("", "")
 		doc.Status = nextcloud.MigrationStatusRunning
 		require.NoError(t, couchdb.CreateDoc(inst, doc))
 
@@ -704,7 +706,7 @@ func TestPostNextcloudMigrationCancel(t *testing.T) {
 			setup := testutils.NewSetup(t, "ncmigration-cancel-"+status)
 			inst := setup.GetTestInstance()
 
-			doc := nextcloud.NewPendingMigration("")
+			doc := nextcloud.NewPendingMigration("", "")
 			doc.Status = status
 			require.NoError(t, couchdb.CreateDoc(inst, doc))
 
@@ -724,7 +726,7 @@ func TestPostNextcloudMigrationCancel(t *testing.T) {
 		setup := testutils.NewSetup(t, "ncmigration-cancel-publishfail")
 		inst := setup.GetTestInstance()
 
-		doc := nextcloud.NewPendingMigration("")
+		doc := nextcloud.NewPendingMigration("", "")
 		doc.Status = nextcloud.MigrationStatusRunning
 		require.NoError(t, couchdb.CreateDoc(inst, doc))
 
@@ -747,7 +749,7 @@ func TestPostNextcloudMigrationCancel(t *testing.T) {
 		setup := testutils.NewSetup(t, "ncmigration-cancel-forbidden")
 		inst := setup.GetTestInstance()
 
-		doc := nextcloud.NewPendingMigration("")
+		doc := nextcloud.NewPendingMigration("", "")
 		doc.Status = nextcloud.MigrationStatusRunning
 		require.NoError(t, couchdb.CreateDoc(inst, doc))
 
@@ -764,5 +766,352 @@ func TestPostNextcloudMigrationCancel(t *testing.T) {
 			Expect().Status(http.StatusForbidden)
 
 		assert.Equal(t, 0, spy.count())
+	})
+}
+
+type nextcloudDeleteMockOptions struct {
+	// deleteStatus is the status returned to a WebDAV DELETE on
+	// /remote.php/dav/files/... Zero means 204 No Content.
+	deleteStatus int
+	// trashStatus is the status returned to a WebDAV DELETE on
+	// /remote.php/dav/trashbin/<user>/trash. Zero means 204.
+	trashStatus int
+	// homeChildren are the top-level entries returned by PROPFIND on
+	// the WebDAV home. Used by the SourcePath="/" flow which lists the
+	// home before deleting each child.
+	homeChildren []string
+}
+
+type nextcloudDeleteMockCounts struct {
+	propfindHome int32
+	deleteFile   int32
+	deleteTrash  int32
+}
+
+// total returns the sum of every WebDAV call observed by the mock.
+// Used by gate-test assertions that expect zero traffic to Nextcloud.
+func (c *nextcloudDeleteMockCounts) total() int32 {
+	return atomic.LoadInt32(&c.propfindHome) +
+		atomic.LoadInt32(&c.deleteFile) +
+		atomic.LoadInt32(&c.deleteTrash)
+}
+
+// startMockNextcloudForDelete stands in for a Nextcloud WebDAV endpoint for
+// the delete-source tests. It only handles DELETE on the files tree: the
+// delete flow never probes OCS because the account is seeded with a cached
+// webdav_user_id.
+func startMockNextcloudForDelete(t *testing.T, opts nextcloudDeleteMockOptions) (url string, counts *nextcloudDeleteMockCounts) {
+	t.Helper()
+	deleteStatus := opts.deleteStatus
+	if deleteStatus == 0 {
+		deleteStatus = http.StatusNoContent
+	}
+	trashStatus := opts.trashStatus
+	if trashStatus == 0 {
+		trashStatus = http.StatusNoContent
+	}
+	counts = &nextcloudDeleteMockCounts{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PROPFIND" && strings.HasPrefix(r.URL.Path, "/remote.php/dav/files/") && strings.HasSuffix(r.URL.Path, "/"):
+			atomic.AddInt32(&counts.propfindHome, 1)
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(buildHomeMultistatus(r.URL.Path, opts.homeChildren)))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/remote.php/dav/trashbin/"):
+			atomic.AddInt32(&counts.deleteTrash, 1)
+			w.WriteHeader(trashStatus)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/remote.php/dav/files/"):
+			atomic.AddInt32(&counts.deleteFile, 1)
+			w.WriteHeader(deleteStatus)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/", counts
+}
+
+// buildHomeMultistatus renders a minimal valid WebDAV multistatus
+// listing the home itself plus the given children. The webdav.List
+// parser only consumes resourcetype + displayname, so we keep the body
+// to that subset.
+func buildHomeMultistatus(homePath string, children []string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>`)
+	b.WriteString(homePath)
+	b.WriteString(`</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)
+	for _, child := range children {
+		b.WriteString(`<d:response><d:href>`)
+		b.WriteString(homePath)
+		b.WriteString(child)
+		b.WriteString(`/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:displayname>`)
+		b.WriteString(child)
+		b.WriteString(`</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)
+	}
+	b.WriteString(`</d:multistatus>`)
+	return b.String()
+}
+
+// seedNextcloudAccount upserts the single nextcloud account for the
+// instance with credentials pointing at the given mock URL and a cached
+// webdav_user_id so nextcloud.New skips the OCS probe.
+func seedNextcloudAccount(t *testing.T, inst *instance.Instance, ncURL string) {
+	t.Helper()
+	_, err := nextcloud.EnsureAccount(inst, ncURL, "alice", "app-password-xxx", "alice-webdav")
+	require.NoError(t, err)
+}
+
+// seedCompletedMigration creates a tracking doc in the completed status
+// with the given source path and returns its id.
+func seedCompletedMigration(t *testing.T, inst *instance.Instance, sourcePath string) string {
+	t.Helper()
+	doc := nextcloud.NewPendingMigration("", sourcePath)
+	doc.Status = nextcloud.MigrationStatusCompleted
+	require.NoError(t, couchdb.CreateDoc(inst, doc))
+	return doc.ID()
+}
+
+func TestPostNextcloudMigrationDeleteSource(t *testing.T) {
+	if testing.Short() {
+		t.Skip("an instance is required for this test: test skipped due to the use of --short flag")
+	}
+
+	config.UseTestFile(t)
+	testutils.NeedCouchdb(t)
+
+	oldBuildMode := build.BuildMode
+	build.BuildMode = build.ModeDev
+	t.Cleanup(func() { build.BuildMode = oldBuildMode })
+
+	t.Run("HappyPath", func(t *testing.T) {
+		setup := testutils.NewSetup(t, "ncmigration-delete-happy")
+		inst := setup.GetTestInstance()
+
+		ncURL, counts := startMockNextcloudForDelete(t, nextcloudDeleteMockOptions{})
+		seedNextcloudAccount(t, inst, ncURL)
+		migrationID := seedCompletedMigration(t, inst, "/photos")
+
+		ts := setupMigrationRouter(t, inst, migrationPermission(), &spyRabbitMQ{})
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		e.POST("/remote/nextcloud/migration/" + migrationID + "/delete-source").
+			WithHost(inst.Domain).
+			Expect().Status(http.StatusNoContent)
+
+		assert.Equal(t, int32(0), atomic.LoadInt32(&counts.propfindHome),
+			"sub-path delete must not list the home")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&counts.deleteFile), "expected one WebDAV DELETE on the sub-path")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&counts.deleteTrash),
+			"trash must be emptied after the source folder is removed")
+
+		var stored nextcloud.Migration
+		require.NoError(t, couchdb.GetDoc(inst, consts.NextcloudMigrations, migrationID, &stored))
+		assert.Equal(t, nextcloud.MigrationStatusCompleted, stored.Status,
+			"status stays completed; the delete is a post-migration cleanup, not a new state")
+		require.NotNil(t, stored.SourceDeletedAt, "SourceDeletedAt must be stamped")
+		assert.WithinDuration(t, time.Now().UTC(), *stored.SourceDeletedAt, time.Minute)
+	})
+
+	t.Run("UnknownMigrationReturns404", func(t *testing.T) {
+		setup := testutils.NewSetup(t, "ncmigration-delete-unknown")
+		inst := setup.GetTestInstance()
+
+		ts := setupMigrationRouter(t, inst, migrationPermission(), &spyRabbitMQ{})
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		e.POST("/remote/nextcloud/migration/does-not-exist/delete-source").
+			WithHost(inst.Domain).
+			Expect().Status(http.StatusNotFound)
+	})
+
+	for _, status := range []string{
+		nextcloud.MigrationStatusPending,
+		nextcloud.MigrationStatusRunning,
+		nextcloud.MigrationStatusFailed,
+		nextcloud.MigrationStatusCanceled,
+	} {
+		status := status
+		t.Run("NotCompleted_"+status, func(t *testing.T) {
+			setup := testutils.NewSetup(t, "ncmigration-delete-status-"+status)
+			inst := setup.GetTestInstance()
+
+			ncURL, counts := startMockNextcloudForDelete(t, nextcloudDeleteMockOptions{})
+			seedNextcloudAccount(t, inst, ncURL)
+
+			doc := nextcloud.NewPendingMigration("", "/photos")
+			doc.Status = status
+			require.NoError(t, couchdb.CreateDoc(inst, doc))
+
+			ts := setupMigrationRouter(t, inst, migrationPermission(), &spyRabbitMQ{})
+			e := testutils.CreateTestClient(t, ts.URL)
+
+			e.POST("/remote/nextcloud/migration/" + doc.ID() + "/delete-source").
+				WithHost(inst.Domain).
+				Expect().Status(http.StatusConflict)
+
+			assert.Equal(t, int32(0), counts.total(),
+				"non-completed migrations must not reach Nextcloud")
+		})
+	}
+
+	t.Run("AlreadyDeletedReturns409", func(t *testing.T) {
+		setup := testutils.NewSetup(t, "ncmigration-delete-already")
+		inst := setup.GetTestInstance()
+
+		ncURL, counts := startMockNextcloudForDelete(t, nextcloudDeleteMockOptions{})
+		seedNextcloudAccount(t, inst, ncURL)
+
+		doc := nextcloud.NewPendingMigration("", "/photos")
+		doc.Status = nextcloud.MigrationStatusCompleted
+		stamped := time.Now().UTC().Add(-1 * time.Hour)
+		doc.SourceDeletedAt = &stamped
+		require.NoError(t, couchdb.CreateDoc(inst, doc))
+
+		ts := setupMigrationRouter(t, inst, migrationPermission(), &spyRabbitMQ{})
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		e.POST("/remote/nextcloud/migration/" + doc.ID() + "/delete-source").
+			WithHost(inst.Domain).
+			Expect().Status(http.StatusConflict)
+
+		assert.Equal(t, int32(0), counts.total())
+	})
+
+	t.Run("EmptySourcePathDefaultsToRoot", func(t *testing.T) {
+		// Legacy tracking docs (or any doc with an empty source_path) are
+		// treated as a root-level migration, mirroring the trigger which
+		// normalizes an empty source_path to "/". Root deletion enumerates
+		// the home and removes each child because Nextcloud refuses
+		// DELETE on the user's WebDAV home itself.
+		setup := testutils.NewSetup(t, "ncmigration-delete-nopath")
+		inst := setup.GetTestInstance()
+
+		ncURL, counts := startMockNextcloudForDelete(t, nextcloudDeleteMockOptions{
+			homeChildren: []string{"Photos", "Documents"},
+		})
+		seedNextcloudAccount(t, inst, ncURL)
+
+		doc := nextcloud.NewPendingMigration("", "")
+		doc.Status = nextcloud.MigrationStatusCompleted
+		require.NoError(t, couchdb.CreateDoc(inst, doc))
+
+		ts := setupMigrationRouter(t, inst, migrationPermission(), &spyRabbitMQ{})
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		e.POST("/remote/nextcloud/migration/" + doc.ID() + "/delete-source").
+			WithHost(inst.Domain).
+			Expect().Status(http.StatusNoContent)
+
+		assert.Equal(t, int32(1), atomic.LoadInt32(&counts.propfindHome),
+			"root delete must list the home before deleting children")
+		assert.Equal(t, int32(2), atomic.LoadInt32(&counts.deleteFile),
+			"each top-level child must be deleted individually")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&counts.deleteTrash),
+			"trash must be emptied after the children are removed")
+
+		var stored nextcloud.Migration
+		require.NoError(t, couchdb.GetDoc(inst, consts.NextcloudMigrations, doc.ID(), &stored))
+		assert.NotNil(t, stored.SourceDeletedAt)
+	})
+
+	t.Run("NextcloudAlreadyGoneIsIdempotent", func(t *testing.T) {
+		setup := testutils.NewSetup(t, "ncmigration-delete-404")
+		inst := setup.GetTestInstance()
+
+		ncURL, counts := startMockNextcloudForDelete(t, nextcloudDeleteMockOptions{
+			deleteStatus: http.StatusNotFound,
+			trashStatus:  http.StatusNotFound,
+		})
+		seedNextcloudAccount(t, inst, ncURL)
+		migrationID := seedCompletedMigration(t, inst, "/photos")
+
+		ts := setupMigrationRouter(t, inst, migrationPermission(), &spyRabbitMQ{})
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		e.POST("/remote/nextcloud/migration/" + migrationID + "/delete-source").
+			WithHost(inst.Domain).
+			Expect().Status(http.StatusNoContent)
+
+		assert.Equal(t, int32(1), atomic.LoadInt32(&counts.deleteFile))
+		assert.Equal(t, int32(1), atomic.LoadInt32(&counts.deleteTrash),
+			"trash empty must still run even when the folder was already gone")
+
+		var stored nextcloud.Migration
+		require.NoError(t, couchdb.GetDoc(inst, consts.NextcloudMigrations, migrationID, &stored))
+		assert.NotNil(t, stored.SourceDeletedAt,
+			"a folder already gone from Nextcloud still stamps SourceDeletedAt so the UI stops offering the button")
+	})
+
+	t.Run("NextcloudInvalidAuthReturns401", func(t *testing.T) {
+		setup := testutils.NewSetup(t, "ncmigration-delete-401")
+		inst := setup.GetTestInstance()
+
+		ncURL, counts := startMockNextcloudForDelete(t, nextcloudDeleteMockOptions{deleteStatus: http.StatusUnauthorized})
+		seedNextcloudAccount(t, inst, ncURL)
+		migrationID := seedCompletedMigration(t, inst, "/photos")
+
+		ts := setupMigrationRouter(t, inst, migrationPermission(), &spyRabbitMQ{})
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		e.POST("/remote/nextcloud/migration/" + migrationID + "/delete-source").
+			WithHost(inst.Domain).
+			Expect().Status(http.StatusUnauthorized)
+
+		assert.Equal(t, int32(0), atomic.LoadInt32(&counts.deleteTrash),
+			"trash empty must not run when the folder delete was rejected")
+
+		var stored nextcloud.Migration
+		require.NoError(t, couchdb.GetDoc(inst, consts.NextcloudMigrations, migrationID, &stored))
+		assert.Nil(t, stored.SourceDeletedAt,
+			"SourceDeletedAt must not be stamped when Nextcloud rejected the credentials")
+	})
+
+	t.Run("RejectsWithoutPermission", func(t *testing.T) {
+		setup := testutils.NewSetup(t, "ncmigration-delete-forbidden")
+		inst := setup.GetTestInstance()
+
+		ncURL, counts := startMockNextcloudForDelete(t, nextcloudDeleteMockOptions{})
+		seedNextcloudAccount(t, inst, ncURL)
+		migrationID := seedCompletedMigration(t, inst, "/photos")
+
+		pdoc := &permission.Permission{
+			Type:     permission.TypeWebapp,
+			SourceID: consts.Apps + "/" + consts.SettingsSlug,
+		}
+		ts := setupMigrationRouter(t, inst, pdoc, &spyRabbitMQ{})
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		e.POST("/remote/nextcloud/migration/" + migrationID + "/delete-source").
+			WithHost(inst.Domain).
+			Expect().Status(http.StatusForbidden)
+
+		assert.Equal(t, int32(0), counts.total())
+	})
+
+	t.Run("TrashEmptyFailureDoesNotStamp", func(t *testing.T) {
+		setup := testutils.NewSetup(t, "ncmigration-delete-trash-fail")
+		inst := setup.GetTestInstance()
+
+		ncURL, counts := startMockNextcloudForDelete(t, nextcloudDeleteMockOptions{
+			trashStatus: http.StatusInternalServerError,
+		})
+		seedNextcloudAccount(t, inst, ncURL)
+		migrationID := seedCompletedMigration(t, inst, "/photos")
+
+		ts := setupMigrationRouter(t, inst, migrationPermission(), &spyRabbitMQ{})
+		e := testutils.CreateTestClient(t, ts.URL)
+
+		e.POST("/remote/nextcloud/migration/" + migrationID + "/delete-source").
+			WithHost(inst.Domain).
+			Expect().Status(http.StatusBadGateway)
+
+		assert.Equal(t, int32(1), atomic.LoadInt32(&counts.deleteFile))
+		assert.Equal(t, int32(1), atomic.LoadInt32(&counts.deleteTrash))
+
+		var stored nextcloud.Migration
+		require.NoError(t, couchdb.GetDoc(inst, consts.NextcloudMigrations, migrationID, &stored))
+		assert.Nil(t, stored.SourceDeletedAt,
+			"SourceDeletedAt must not be stamped if the trash empty failed: the user can retry to clear quota")
 	})
 }
