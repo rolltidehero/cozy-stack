@@ -18,7 +18,7 @@ const (
 
 const (
 	RoutingKeyUserPasswordUpdated         = "user.password.updated"
-	RoutingKeyB2BUserDeleted              = "user.deleted"
+	RoutingKeyB2BUserDeleted              = "domain.user.deleted"
 	RoutingKeyUserDeletionRequested       = "user.deletion.requested"
 	RoutingKeyNextcloudMigrationRequested = "nextcloud.migration.requested"
 	RoutingKeyNextcloudMigrationCanceled  = "nextcloud.migration.canceled"

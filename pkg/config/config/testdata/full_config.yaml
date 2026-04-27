@@ -162,7 +162,7 @@ rabbitmq:
           prefetch: 8
           delivery_limit: 5
           bindings:
-            - user.deleted
+            - domain.user.deleted
 
 common_settings:
   default:

@@ -372,7 +372,7 @@ func TestHandlers(t *testing.T) {
 		err = ch.PublishWithContext(
 			testCtx(t),
 			"b2b",
-			"user.deleted",
+			rabbitmq.RoutingKeyB2BUserDeleted,
 			false,
 			false,
 			amqp.Publishing{
@@ -874,7 +874,7 @@ func TestUserDeletedHandlerValidation(t *testing.T) {
 		require.NoError(t, err)
 
 		err = rabbitmq.NewUserDeletedHandler().Handle(testCtx(t), amqp.Delivery{
-			RoutingKey: "user.deleted",
+			RoutingKey: rabbitmq.RoutingKeyB2BUserDeleted,
 			Body:       body,
 		})
 		require.Error(t, err)
@@ -889,7 +889,7 @@ func TestUserDeletedHandlerValidation(t *testing.T) {
 		require.NoError(t, err)
 
 		err = rabbitmq.NewUserDeletedHandler().Handle(testCtx(t), amqp.Delivery{
-			RoutingKey: "user.deleted",
+			RoutingKey: rabbitmq.RoutingKeyB2BUserDeleted,
 			Body:       body,
 		})
 		require.Error(t, err)
@@ -904,7 +904,7 @@ func TestUserDeletedHandlerValidation(t *testing.T) {
 		require.NoError(t, err)
 
 		err = rabbitmq.NewUserDeletedHandler().Handle(testCtx(t), amqp.Delivery{
-			RoutingKey: "user.deleted",
+			RoutingKey: rabbitmq.RoutingKeyB2BUserDeleted,
 			Body:       body,
 		})
 		require.Error(t, err)
@@ -1060,7 +1060,7 @@ func setUpRabbitMQConfig(t *testing.T, mq *testutils.RabbitFixture, name string)
 			Queues: []config.RabbitQueue{
 				{
 					Name:     "stack.b2b.user.deleted",
-					Bindings: []string{"user.deleted"},
+					Bindings: []string{rabbitmq.RoutingKeyB2BUserDeleted},
 					Prefetch: 4,
 					Declare:  true,
 				},
